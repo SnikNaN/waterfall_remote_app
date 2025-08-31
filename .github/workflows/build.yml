@@ -4,26 +4,31 @@ on:
   push:
   pull_request:
 
+env:
+  PROJECT_DIR: android   # <- имя папки, где лежит settings.gradle.kts
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle (no wrapper yet)
+      - name: Setup Gradle (points at subdir)
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.7
+          build-root-directory: ${{ env.PROJECT_DIR }}
 
       - name: Generate Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
         run: gradle wrapper --gradle-version 8.7
 
       - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: ./gradlew :app:assembleDebug
