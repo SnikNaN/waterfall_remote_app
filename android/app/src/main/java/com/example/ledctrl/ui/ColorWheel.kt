@@ -12,8 +12,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.atan2
-import kotlin.math.hypot
-import kotlin.math.min
+import kotlin.math.sqrt
 
 @Composable
 fun ColorWheel(
@@ -25,25 +24,28 @@ fun ColorWheel(
         modifier = modifier
             .size(wheelSize)
             .pointerInput(Unit) {
+                // В pointerInput есть собственный Size (Float!), используем его,
+                // чтобы не тащить никаких Int и не конвертить
                 detectDragGestures(
-                    onDragStart = { o ->
-                        onColorChanged(pickColor(o, this.size.width, this.size.height))
+                    onDragStart = { pos ->
+                        onColorChanged(pickColor(pos.x, pos.y, size.width, size.height))
                     },
                     onDrag = { change, _ ->
-                        onColorChanged(pickColor(change.position, this.size.width, this.size.height))
+                        onColorChanged(pickColor(change.position.x, change.position.y, size.width, size.height))
                     }
                 )
             }
     ) {
-        val cx: Float = size.width / 2f
-        val cy: Float = size.height / 2f
+        // Здесь тоже везде только Float
+        val cx = size.width / 2f
+        val cy = size.height / 2f
         val center = Offset(cx, cy)
-        val radius: Float = min(size.width, size.height) / 2f
+        val radius = if (size.width < size.height) size.width / 2f else size.height / 2f
 
-        // Кольцо оттенков (H)
+        // Кольцо оттенков (Hue)
         drawCircle(
             brush = Brush.sweepGradient(
-                colors = listOf(
+                listOf(
                     Color.Red,
                     Color.Magenta,
                     Color.Blue,
@@ -70,20 +72,24 @@ fun ColorWheel(
     }
 }
 
-/** Вычисление цвета по позиции касания */
-private fun pickColor(pos: Offset, w: Float, h: Float): Color {
-    val cx: Float = w / 2f
-    val cy: Float = h / 2f
-    val dx: Float = pos.x - cx
-    val dy: Float = pos.y - cy
-    val radius: Float = min(w, h) / 2f
+/**
+ * Преобразование координат касания -> HSV цвет.
+ * Всё на float, без min()/hypot() из Double и без Int.
+ */
+private fun pickColor(x: Float, y: Float, w: Float, h: Float): Color {
+    val cx = w / 2f
+    val cy = h / 2f
+    val dx = x - cx
+    val dy = y - cy
+    val radius = if (w < h) w / 2f else h / 2f
 
-    val distance: Float = hypot(dx, dy)
-    val sat: Float = (distance / radius).coerceIn(0f, 1f)
+    // расстояние до центра (явно на float)
+    val dist = sqrt(dx * dx + dy * dy)
+    val sat = (dist / radius).coerceIn(0f, 1f)
 
-    val angleDeg: Float = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
-    val hue: Float = ((angleDeg + 360f) % 360f)
+    // угол -> градусы [0..360)
+    val angleDeg = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
+    val hue = ((angleDeg + 360f) % 360f)
 
     return Color.hsv(hue, sat, 1f)
 }
-
