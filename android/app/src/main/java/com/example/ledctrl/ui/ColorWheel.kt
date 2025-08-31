@@ -26,25 +26,38 @@ fun ColorWheel(
             .size(wheelSize)
             .pointerInput(Unit) {
                 detectDragGestures(
-                    onDragStart = { o -> onColorChanged(pickColor(o, size.width, size.height)) },
-                    onDrag = { change, _ -> onColorChanged(pickColor(change.position, size.width, size.height)) }
+                    onDragStart = { o ->
+                        onColorChanged(pickColor(o, this.size.width, this.size.height))
+                    },
+                    onDrag = { change, _ ->
+                        onColorChanged(pickColor(change.position, this.size.width, this.size.height))
+                    }
                 )
             }
     ) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = min(size.width, size.height) / 2f
+        val cx: Float = size.width / 2f
+        val cy: Float = size.height / 2f
+        val center = Offset(cx, cy)
+        val radius: Float = min(size.width, size.height) / 2f
 
+        // Кольцо оттенков (H)
         drawCircle(
             brush = Brush.sweepGradient(
-                listOf(
-                    Color.Red, Color.Magenta, Color.Blue,
-                    Color.Cyan, Color.Green, Color.Yellow, Color.Red
+                colors = listOf(
+                    Color.Red,
+                    Color.Magenta,
+                    Color.Blue,
+                    Color.Cyan,
+                    Color.Green,
+                    Color.Yellow,
+                    Color.Red
                 )
             ),
             center = center,
             radius = radius
         )
 
+        // К центру — белый (уменьшаем насыщенность)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(Color.White, Color.Transparent),
@@ -57,19 +70,20 @@ fun ColorWheel(
     }
 }
 
+/** Вычисление цвета по позиции касания */
 private fun pickColor(pos: Offset, w: Float, h: Float): Color {
-    val cx = w / 2f
-    val cy = h / 2f
-    val dx = pos.x - cx
-    val dy = pos.y - cy
-    val radius = min(w, h) / 2f
+    val cx: Float = w / 2f
+    val cy: Float = h / 2f
+    val dx: Float = pos.x - cx
+    val dy: Float = pos.y - cy
+    val radius: Float = min(w, h) / 2f
 
-    val distance = hypot(dx, dy)
-    val sat = (distance / radius).coerceIn(0f, 1f)
+    val distance: Float = hypot(dx, dy)
+    val sat: Float = (distance / radius).coerceIn(0f, 1f)
 
-    val angle = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
-    val hue = ((angle + 360f) % 360f)
+    val angleDeg: Float = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
+    val hue: Float = ((angleDeg + 360f) % 360f)
 
-    val value = 1f
-    return Color.hsv(hue, sat, value)
+    return Color.hsv(hue, sat, 1f)
 }
+
