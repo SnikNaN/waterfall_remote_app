@@ -76,7 +76,7 @@ fun ColorWheel(
  * Преобразование координат касания -> HSV цвет.
  * Всё на float, без min()/hypot() из Double и без Int.
  */
-private fun pickColor(x: Float, y: Float, w: Float, h: Float): Color {
+private fun pickColor(x: Float, y: Float, w: Int, h: Int): Color {
     val cx = w / 2f
     val cy = h / 2f
     val dx = x - cx
