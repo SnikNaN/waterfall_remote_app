@@ -12,9 +12,12 @@ class LedApi(baseInput: String) {
 
     init {
         val trimmed = baseInput.trim()
-        val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "http://$trimmed"
-        val uri = try { URI(withScheme) } catch (e: Exception) { throw IllegalArgumentException("Bad address: $baseInput") }
-        val scheme = if (uri.scheme != null) uri.scheme else "http"
+        val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://"))
+            trimmed else "http://$trimmed"
+        val uri = try { URI(withScheme) } catch (_: Exception) {
+            throw IllegalArgumentException("Bad address: $baseInput")
+        }
+        val scheme = uri.scheme ?: "http"
         val host = uri.host ?: uri.authority ?: throw IllegalArgumentException("No host in address")
         val portPart = if (uri.port != -1) ":${uri.port}" else ""
         base = "$scheme://$host$portPart"
@@ -26,10 +29,7 @@ class LedApi(baseInput: String) {
         .readTimeout(3, TimeUnit.SECONDS)
         .build()
 
-    private fun url(path: String): String {
-        val p = path.removePrefix("/")
-        return "$base/$p"
-    }
+    private fun url(path: String): String = "$base/${path.removePrefix("/")}"
 
     private suspend fun get(path: String): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -50,9 +50,11 @@ class LedApi(baseInput: String) {
     suspend fun select(start: Int, end: Int, blink: Boolean = false): Boolean =
         get("select?start=$start&end=$end${if (blink) "&blink=1" else ""}")
 
+    // ВАЖНО: убираем '#' (иначе браузерный якорь ломает запрос)
     suspend fun setPreviewHex(hex: String, lbright: Int? = null): Boolean {
+        val clean = hex.trim().removePrefix("#")
         val lb = lbright?.let { "&lbright=${it.coerceIn(0,255)}" } ?: ""
-        return get("set?hex=$hex$lb")
+        return get("set?hex=$clean$lb")
     }
 
     suspend fun setLocalBrightness(value: Int): Boolean =
