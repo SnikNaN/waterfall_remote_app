@@ -32,7 +32,6 @@ private val keyIp = stringPreferencesKey("ip")
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent { App() }
     }
 
@@ -41,6 +40,7 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
 
         var status by remember { mutableStateOf("Idle") }
+        var lastUrl by remember { mutableStateOf<String?>(null) }   // ← отдельная строка для URL
         var ipText by remember { mutableStateOf(TextFieldValue("")) }
         var startIdx by remember { mutableStateOf(0f) }
         var endIdx by remember { mutableStateOf(0f) }
@@ -59,10 +59,10 @@ class MainActivity : ComponentActivity() {
             if (!saved.isNullOrBlank()) ipText = TextFieldValue(saved)
         }
 
-        // отображаем последнюю строку запроса (из Api.kt)
+        // подписка на шину запросов: не затираем status, держим отдельный lastUrl
         LaunchedEffect(Unit) {
             RequestBus.last.collectLatest { url ->
-                if (url != null) status = "GET → $url"
+                lastUrl = url
             }
         }
 
@@ -104,7 +104,7 @@ class MainActivity : ComponentActivity() {
                         val raw = api()?.stateRaw()
                         if (raw != null) {
                             status = "Online"
-                            // вытянем num_leds и bright простым парсером
+                            // простая вытяжка num_leds и bright
                             val n = run {
                                 val k = "\"num_leds\":"
                                 val i = raw.indexOf(k)
@@ -141,14 +141,14 @@ class MainActivity : ComponentActivity() {
                         val part = (1..254).chunked(32)
                         val found = mutableListOf<String>()
                         for (chunk in part) {
-                            val list = chunk.map { host ->
+                            val jobs = chunk.map { host ->
                                 scope.launch(Dispatchers.IO) {
                                     val ip = "$prefix.$host"
                                     val ok = try { LedApi(ip).ping() } catch (_: Exception) { false }
                                     if (ok) synchronized(found) { found.add(ip) }
                                 }
                             }
-                            list.forEach { it.join() } // дождаться пачки
+                            jobs.forEach { it.join() } // дождаться пачки
                         }
                         foundHosts = found.sorted()
                         showPicker = true
@@ -209,6 +209,7 @@ class MainActivity : ComponentActivity() {
                         hasSelection = okSel
                         if (!okSel) { status = "Select failed"; return@launch }
                     }
+                    // Формируем RRGGBB (без '#')
                     val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                         "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                     }
@@ -286,6 +287,11 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(Modifier.height(8.dp))
+
+            // Полоса состояния + последний URL
+            if (lastUrl != null) {
+                Text("Last request: $lastUrl", style = MaterialTheme.typography.bodySmall)
+            }
             Box(Modifier.fillMaxWidth().height(40.dp).background(Color(1f, 1f, 1f, 0.05f)))
             Text("Status: $status")
         }
