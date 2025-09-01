@@ -41,7 +41,7 @@ class LedApi(baseInput: String) {
     private suspend fun getStatus(path: String): Pair<Int,String?>? = withContext(Dispatchers.IO) {
         try {
             client.newCall(Request.Builder().url(url(path)).build())
-                .execute().use { it.code() to (it.body?.string()) }
+                .execute().use { it.code to (it.body?.string()) }   // <-- code (val), не code()
         } catch (_: Exception) { null }
     }
 
@@ -57,14 +57,13 @@ class LedApi(baseInput: String) {
     suspend fun select(start: Int, end: Int, blink: Boolean = false): Boolean =
         get("select?start=$start&end=$end${if (blink) "&blink=1" else ""}")
 
-    // ВАЖНО: убираем '#', иначе сервер получает пустой hex (фрагмент URL)
+    // убираем '#' на всякий случай
     suspend fun setPreviewHexStatus(hex: String, lbright: Int? = null): Pair<Int,String?>? {
         val clean = hex.trim().removePrefix("#")
         val lb = lbright?.let { "&lbright=${it.coerceIn(0,255)}" } ?: ""
         return getStatus("set?hex=$clean$lb")
     }
 
-    // Удобная обёртка: true только если 200
     suspend fun setPreviewHex(hex: String, lbright: Int? = null): Boolean =
         setPreviewHexStatus(hex, lbright)?.first == 200
 
