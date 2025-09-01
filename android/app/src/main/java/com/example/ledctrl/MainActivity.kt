@@ -195,7 +195,7 @@ class MainActivity : ComponentActivity() {
                         }
                         // ШЛЁМ RRGGBB (без #) — иначе сервер видит пустой hex
                         val hex = listOf(c.red, c.green, c.blue).joinToString("") {
-                            "%02X".format((it * 255f).toInt().coerceIn(0, 255))
+                            "hex=%02X".format((it * 255f).toInt().coerceIn(0, 255))
                         }
                         val resp = api()?.setPreviewHexStatus(hex /*, lbright = localBright.toInt() */)
                         status = when (resp?.first) {
