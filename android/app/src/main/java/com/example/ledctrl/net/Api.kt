@@ -38,10 +38,17 @@ class LedApi(baseInput: String) {
         } catch (_: Exception) { false }
     }
 
+    private suspend fun getStatus(path: String): Pair<Int,String?>? = withContext(Dispatchers.IO) {
+        try {
+            client.newCall(Request.Builder().url(url(path)).build())
+                .execute().use { it.code() to (it.body?.string()) }
+        } catch (_: Exception) { null }
+    }
+
     suspend fun stateRaw(): String? = withContext(Dispatchers.IO) {
         try {
             client.newCall(Request.Builder().url(url("state")).build())
-                .execute().use { if (it.isSuccessful) it.body?.string() else null }
+                .execute().use { if (it.isSuccessful) it.body?.string() else it.body?.string() }
         } catch (_: Exception) { null }
     }
 
@@ -50,12 +57,16 @@ class LedApi(baseInput: String) {
     suspend fun select(start: Int, end: Int, blink: Boolean = false): Boolean =
         get("select?start=$start&end=$end${if (blink) "&blink=1" else ""}")
 
-    // ВАЖНО: убираем '#' (иначе браузерный якорь ломает запрос)
-    suspend fun setPreviewHex(hex: String, lbright: Int? = null): Boolean {
+    // ВАЖНО: убираем '#', иначе сервер получает пустой hex (фрагмент URL)
+    suspend fun setPreviewHexStatus(hex: String, lbright: Int? = null): Pair<Int,String?>? {
         val clean = hex.trim().removePrefix("#")
         val lb = lbright?.let { "&lbright=${it.coerceIn(0,255)}" } ?: ""
-        return get("set?hex=$clean$lb")
+        return getStatus("set?hex=$clean$lb")
     }
+
+    // Удобная обёртка: true только если 200
+    suspend fun setPreviewHex(hex: String, lbright: Int? = null): Boolean =
+        setPreviewHexStatus(hex, lbright)?.first == 200
 
     suspend fun setLocalBrightness(value: Int): Boolean =
         get("lbright?value=${value.coerceIn(0,255)}")
