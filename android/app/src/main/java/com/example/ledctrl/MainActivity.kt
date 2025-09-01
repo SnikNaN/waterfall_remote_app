@@ -16,10 +16,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ledctrl.net.LedApi
-import com.example.ledctrl.net.RequestBus
 import com.example.ledctrl.ui.ColorWheel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,9 +37,8 @@ class MainActivity : ComponentActivity() {
     fun App() {
         val scope = rememberCoroutineScope()
 
-        // показываем только запросы
+        // Пишем сюда только строки запросов
         var lastUrl by remember { mutableStateOf<String?>(null) }
-        var lastCode by remember { mutableStateOf<Int?>(null) }
 
         var ipText by remember { mutableStateOf(TextFieldValue("")) }
         var startIdx by remember { mutableStateOf(0f) }
@@ -51,22 +48,20 @@ class MainActivity : ComponentActivity() {
         var localBright by remember { mutableStateOf(255f) }
         var globalBright by remember { mutableStateOf(128f) }
 
-        // сканирование
+        // сетевое сканирование
         var foundHosts by remember { mutableStateOf(listOf<String>()) }
         var showPicker by remember { mutableStateOf(false) }
 
-        // загрузка IP
+        // загрузка сохранённого IP
         LaunchedEffect(Unit) {
             val saved = dataStore.data.first()[keyIp]
             if (!saved.isNullOrBlank()) ipText = TextFieldValue(saved)
         }
 
-        // подписка на RequestBus: отражаем URL и код
-        LaunchedEffect(Unit) {
-            RequestBus.last.collectLatest { pair ->
-                lastUrl = pair?.first
-                lastCode = pair?.second
-            }
+        fun baseUrl(): String {
+            val raw = ipText.text.trim().removeSuffix("/")
+            val withScheme = if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "http://$raw"
+            return withScheme
         }
 
         fun api(): LedApi? = ipText.text.trim().takeIf { it.isNotEmpty() }?.let { LedApi(it) }
@@ -83,6 +78,20 @@ class MainActivity : ComponentActivity() {
             modifier = Modifier.fillMaxSize().padding(16.dp),
             horizontalAlignment = Alignment.Start
         ) {
+            // ВЕРХНИЙ БЛОК: последняя строка запроса (бросается в глаза)
+            if (lastUrl != null) {
+                Text(
+                    text = "Last request:\n$lastUrl",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Red,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x10FF0000))
+                        .padding(8.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
             // IP
             OutlinedTextField(
                 value = ipText,
@@ -101,8 +110,12 @@ class MainActivity : ComponentActivity() {
 
                 Button(onClick = {
                     scope.launch {
+                        // /state
+                        val url = "${baseUrl()}/state"
+                        lastUrl = url
                         val raw = api()?.stateRaw()
                         if (raw != null) {
+                            // простая вытяжка num_leds и bright
                             val n = "\"num_leds\":".let { k ->
                                 val i = raw.indexOf(k)
                                 if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull()
@@ -115,17 +128,21 @@ class MainActivity : ComponentActivity() {
                             }
                             if (n != null && n > 0) { numLeds = n; startIdx = 0f; endIdx = (n - 1).toFloat() }
                             if (gb != null) globalBright = gb.toFloat()
-                            api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false)
+
+                            // /select без blink
+                            val s = startIdx.toInt(); val e = endIdx.toInt()
+                            lastUrl = "${baseUrl()}/select?start=$s&end=$e"
+                            api()?.select(s, e, blink = false)
                             hasSelection = true
                         }
                     }
-                }) { Text("Test /state") }
+                }) { Text("Test /state + select") }
 
                 Button(onClick = {
                     scope.launch {
+                        // сканирование подсети
                         val me = withContext(Dispatchers.IO) { getLocalIpv4() }
-                        val prefix = me?.let { subnetPrefix(it) }
-                        if (prefix == null) return@launch
+                        val prefix = me?.let { subnetPrefix(it) } ?: return@launch
                         val part = (1..254).chunked(32)
                         val found = mutableListOf<String>()
                         for (chunk in part) {
@@ -191,13 +208,18 @@ class MainActivity : ComponentActivity() {
                 scope.launch {
                     clampRange()
                     if (!hasSelection) {
-                        val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
+                        val s = startIdx.toInt(); val e = endIdx.toInt()
+                        lastUrl = "${baseUrl()}/select?start=$s&end=$e"
+                        val okSel = api()?.select(s, e, blink = false) ?: false
                         hasSelection = okSel
                         if (!okSel) return@launch
                     }
+                    // Формируем RRGGBB (без '#')
                     val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                         "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                     }
+                    // /set?hex=...
+                    lastUrl = "${baseUrl()}/set?hex=$hex"
                     api()?.setPreviewHexStatus(hex)
                 }
             })
@@ -211,7 +233,10 @@ class MainActivity : ComponentActivity() {
                 onValueChange = { localBright = it },
                 onValueChangeFinished = {
                     scope.launch {
-                        if (hasSelection) api()?.setLocalBrightness(localBright.toInt())
+                        if (!hasSelection) return@launch
+                        val v = localBright.toInt().coerceIn(0,255)
+                        lastUrl = "${baseUrl()}/lbright?value=$v"
+                        api()?.setLocalBrightness(v)
                     }
                 },
                 valueRange = 0f..255f,
@@ -224,7 +249,11 @@ class MainActivity : ComponentActivity() {
                 value = globalBright,
                 onValueChange = { globalBright = it },
                 onValueChangeFinished = {
-                    scope.launch { api()?.setGlobalBrightness(globalBright.toInt()) }
+                    scope.launch {
+                        val v = globalBright.toInt().coerceIn(0,255)
+                        lastUrl = "${baseUrl()}/brightness?value=$v"
+                        api()?.setGlobalBrightness(v)
+                    }
                 },
                 valueRange = 0f..255f,
                 modifier = Modifier.fillMaxWidth()
@@ -236,33 +265,38 @@ class MainActivity : ComponentActivity() {
                 Button(onClick = {
                     scope.launch {
                         clampRange()
-                        api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true)
+                        val s = startIdx.toInt(); val e = endIdx.toInt()
+                        lastUrl = "${baseUrl()}/select?start=$s&end=$e&blink=1"
+                        api()?.select(s, e, blink = true)
                         hasSelection = true
                     }
                 }) { Text("Select + Blink") }
 
-                Button(onClick = { scope.launch { api()?.cancel(); hasSelection = false } }) { Text("Cancel") }
-                Button(onClick = { scope.launch { api()?.save() } }) { Text("Save") }
+                Button(onClick = {
+                    scope.launch {
+                        lastUrl = "${baseUrl()}/cancel"
+                        api()?.cancel()
+                        hasSelection = false
+                    }
+                }) { Text("Cancel") }
+
+                Button(onClick = {
+                    scope.launch {
+                        lastUrl = "${baseUrl()}/save"
+                        api()?.save()
+                    }
+                }) { Text("Save") }
             }
 
             Spacer(Modifier.height(12.dp))
 
-            // Видим только запросы: URL + код
-            if (lastUrl != null) {
-                val codeTxt = lastCode?.toString() ?: "—"
-                val color = when (lastCode) {
-                    in 200..299 -> Color(0xFF2E7D32) // зелёный для 2xx
-                    in 400..499 -> Color(0xFFC62828) // красный для 4xx
-                    in 500..599 -> Color(0xFFAD1457) // малиновый для 5xx
-                    null -> Color(0xFF6D4C41)       // сеть/исключение
-                    else -> Color(0xFF1565C0)       // прочее
-                }
-                Text(
-                    text = "Last: [$codeTxt] $lastUrl",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = color
-                )
-            }
+            // Небольшая “подложка”, чтобы верхний блок с URL не сливался
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(12.dp)
+                    .background(Color(0x06000000))
+            )
         }
     }
 }
