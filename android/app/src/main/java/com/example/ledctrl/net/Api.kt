@@ -1,11 +1,20 @@
 package com.example.ledctrl.net
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URI
 import java.util.concurrent.TimeUnit
+
+/**
+ * RequestBus — чтобы прямо в приложении показывать последний отправленный URL.
+ */
+object RequestBus {
+    val last = MutableStateFlow<String?>(null)
+}
 
 class LedApi(baseInput: String) {
     private val base: String
@@ -32,22 +41,31 @@ class LedApi(baseInput: String) {
     private fun url(path: String): String = "$base/${path.removePrefix("/")}"
 
     private suspend fun get(path: String): Boolean = withContext(Dispatchers.IO) {
+        val full = url(path)
+        RequestBus.last.value = full
+        Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(url(path)).build())
+            client.newCall(Request.Builder().url(full).build())
                 .execute().use { it.isSuccessful }
         } catch (_: Exception) { false }
     }
 
-    private suspend fun getStatus(path: String): Pair<Int,String?>? = withContext(Dispatchers.IO) {
+    private suspend fun getStatus(path: String): Pair<Int, String?>? = withContext(Dispatchers.IO) {
+        val full = url(path)
+        RequestBus.last.value = full
+        Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(url(path)).build())
-                .execute().use { it.code to (it.body?.string()) }   // <-- code (val), не code()
+            client.newCall(Request.Builder().url(full).build())
+                .execute().use { it.code to (it.body?.string()) }
         } catch (_: Exception) { null }
     }
 
     suspend fun stateRaw(): String? = withContext(Dispatchers.IO) {
+        val full = url("state")
+        RequestBus.last.value = full
+        Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(url("state")).build())
+            client.newCall(Request.Builder().url(full).build())
                 .execute().use { if (it.isSuccessful) it.body?.string() else it.body?.string() }
         } catch (_: Exception) { null }
     }
@@ -57,8 +75,8 @@ class LedApi(baseInput: String) {
     suspend fun select(start: Int, end: Int, blink: Boolean = false): Boolean =
         get("select?start=$start&end=$end${if (blink) "&blink=1" else ""}")
 
-    // убираем '#' на всякий случай
-    suspend fun setPreviewHexStatus(hex: String, lbright: Int? = null): Pair<Int,String?>? {
+    // '#RRGGBB' или 'RRGGBB'
+    suspend fun setPreviewHexStatus(hex: String, lbright: Int? = null): Pair<Int, String?>? {
         val clean = hex.trim().removePrefix("#")
         val lb = lbright?.let { "&lbright=${it.coerceIn(0,255)}" } ?: ""
         return getStatus("set?hex=$clean$lb")
