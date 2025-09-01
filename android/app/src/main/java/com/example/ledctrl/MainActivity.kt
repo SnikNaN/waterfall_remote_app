@@ -17,7 +17,10 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ledctrl.net.LedApi
 import com.example.ledctrl.ui.ColorWheel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 private val ComponentActivity.dataStore by preferencesDataStore(name = "settings")
 
@@ -36,26 +39,29 @@ class MainActivity : ComponentActivity() {
         var status by remember { mutableStateOf("Idle") }
         var globalBright by remember { mutableStateOf(128f) }
 
-        // Диапазон (по твоему коду NUM_LEDS=99 => индексы 0..98)
         var numLeds by remember { mutableStateOf(99) }
         var startIdx by remember { mutableStateOf(0f) }
         var endIdx by remember { mutableStateOf(98f) }
-
-        // Локальная яркость выбранного диапазона
         var localBright by remember { mutableStateOf(255f) }
+        var hasSelection by remember { mutableStateOf(false) }
 
-        // Подтягиваем сохранённый IP
+        // Scan dialog state
+        var scanning by remember { mutableStateOf(false) }
+        var foundHosts by remember { mutableStateOf(listOf<String>()) }
+        var showPicker by remember { mutableStateOf(false) }
+
+        // Load saved IP
         LaunchedEffect(Unit) {
             dataStore.data.collect { prefs ->
                 val saved = prefs[keyIp] ?: ""
-                if (saved.isNotEmpty() && ipText.text.isEmpty()) ipText = TextFieldValue(saved)
+                if (saved.isNotEmpty() && ipText.text.isEmpty())
+                    ipText = TextFieldValue(saved)
             }
         }
 
         fun api(): LedApi? = ipText.text.trim().takeIf { it.isNotEmpty() }?.let { LedApi(it) }
 
         fun clampRange() {
-            // в твоём прошивочном коде clampRange() делает 0..NUM_LEDS-1 и перестановку
             val max = (numLeds - 1).coerceAtLeast(0)
             if (startIdx < 0f) startIdx = 0f
             if (endIdx < 0f) endIdx = 0f
@@ -71,11 +77,11 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize().padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Подключение
+                // Connection row
                 OutlinedTextField(
                     value = ipText,
                     onValueChange = { ipText = it },
-                    label = { Text("ESP IP/host (напр. 192.168.1.50)") },
+                    label = { Text("ESP IP/host (e.g. 192.168.1.50)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -89,38 +95,101 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = {
                         scope.launch {
                             val raw = api()?.stateRaw()
-                            status = if (raw != null) "Online" else "No response"
-                            // (опционально) простая вытяжка num_leds/bright
-                            raw?.let {
-                                // грубо вытаскиваем числа без сторонних зависимостей
-                                val n = "\"num_leds\":".let { k -> it.indexOf(k).takeIf { i-> i>=0 }?.let { j ->
-                                    it.substring(j).substringAfter(':').takeWhile { ch -> ch.isDigit() }.toIntOrNull()
-                                } }
-                                val gb = "\"bright\":".let { k -> it.indexOf(k).takeIf { i-> i>=0 }?.let { j ->
-                                    it.substring(j).substringAfter(':').takeWhile { ch -> ch.isDigit() }.toIntOrNull()
-                                } }
-                                if (n != null && n > 0) {
-                                    numLeds = n
-                                    endIdx = (n - 1).toFloat()
+                            if (raw != null) {
+                                status = "Online"
+                                // parse num_leds and bright lazily
+                                val n = run {
+                                    val k = "\"num_leds\":"
+                                    val i = raw.indexOf(k)
+                                    if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
                                 }
+                                val gb = run {
+                                    val k = "\"bright\":"
+                                    val i = raw.indexOf(k)
+                                    if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
+                                }
+                                if (n != null && n > 0) { numLeds = n; startIdx = 0f; endIdx = (n - 1).toFloat() }
                                 if (gb != null) globalBright = gb.toFloat()
+
+                                // Select whole strip silently
+                                val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
+                                hasSelection = okSel
+                                status = if (okSel) "Online · selection 0–${endIdx.toInt()}" else "Online · selection failed"
+                            } else {
+                                status = "No response"
                             }
                         }
                     }) { Text("Test /state") }
+                    Button(onClick = {
+                        // Scan subnet
+                        val myIp = getLocalIpv4()
+                        val prefix = myIp?.let { subnetPrefix(it) }
+                        if (prefix == null) {
+                            status = "Can't detect subnet"
+                            return@Button
+                        }
+                        scanning = true
+                        status = "Scanning $prefix.*"
+                        scope.launch(Dispatchers.IO) {
+                            val candidates = (1..254).map { "$prefix.$it" }
+                            val okList = mutableListOf<String>()
+                            val chunk = 32
+                            for (part in candidates.chunked(chunk)) {
+                                val jobs = part.map { host ->
+                                    kotlinx.coroutines.async {
+                                        val client = LedApi(host)
+                                        if (client.ping()) host else null
+                                    }
+                                }
+                                val res = jobs.mapNotNull { it.await() }
+                                synchronized(okList) { okList.addAll(res) }
+                            }
+                            foundHosts = okList.sorted()
+                            scanning = false
+                            showPicker = true
+                            status = if (okList.isEmpty()) "No devices" else "Found: ${okList.size}"
+                        }
+                    }) { Text(if (scanning) "Scanning..." else "Scan") }
                 }
 
                 Spacer(Modifier.height(8.dp))
                 Text("Status: $status")
 
+                if (showPicker) {
+                    AlertDialog(
+                        onDismissRequest = { showPicker = false },
+                        title = { Text("Выбери устройство") },
+                        text = {
+                            Column {
+                                if (foundHosts.isEmpty()) Text("Ничего не найдено")
+                                foundHosts.forEach { host ->
+                                    Button(onClick = {
+                                        ipText = TextFieldValue(host)
+                                        showPicker = false
+                                        status = "Selected $host"
+                                    }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                        Text(host)
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = { TextButton(onClick = { showPicker = false }) { Text("Close") } }
+                    )
+                }
+
                 Spacer(Modifier.height(12.dp))
 
-                // Колесо цвета — превью на выбранном диапазоне
+                // Color wheel preview on selection
                 ColorWheel(onColorChanged = { c: Color ->
                     scope.launch {
                         clampRange()
+                        if (!hasSelection) {
+                            val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
+                            hasSelection = okSel
+                            if (!okSel) { status = "Select failed"; return@launch }
+                        }
                         val hex = "#" + listOf(c.red, c.green, c.blue).joinToString("") {
-                            val v = (it * 255f).toInt().coerceIn(0, 255)
-                            "%02X".format(v)
+                            "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                         }
                         val ok = api()?.setPreviewHex(hex) ?: false
                         status = if (ok) "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}" else "Set preview failed"
@@ -129,8 +198,8 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.height(16.dp))
 
-                // Диапазон
-                Text("Диапазон: ${startIdx.toInt()} – ${endIdx.toInt()} (из 0..${numLeds-1})")
+                // Range sliders
+                Text("Диапазон: ${startIdx.toInt()} – ${endIdx.toInt()} (0..${numLeds-1})")
                 Slider(
                     value = startIdx,
                     onValueChange = { startIdx = it; if (startIdx > endIdx) endIdx = startIdx },
@@ -138,6 +207,7 @@ class MainActivity : ComponentActivity() {
                         scope.launch {
                             clampRange()
                             val ok = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true) ?: false
+                            hasSelection = ok
                             status = if (ok) "Selected ${startIdx.toInt()}–${endIdx.toInt()}" else "Select failed"
                         }
                     },
@@ -150,6 +220,7 @@ class MainActivity : ComponentActivity() {
                         scope.launch {
                             clampRange()
                             val ok = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true) ?: false
+                            hasSelection = ok
                             status = if (ok) "Selected ${startIdx.toInt()}–${endIdx.toInt()}" else "Select failed"
                         }
                     },
@@ -167,6 +238,7 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = {
                         scope.launch {
                             val ok = api()?.save() ?: false
+                            hasSelection = false
                             status = if (ok) "Saved" else "Save failed"
                         }
                     }, modifier = Modifier.weight(1f)) { Text("Save") }
@@ -174,6 +246,7 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = {
                         scope.launch {
                             val ok = api()?.cancel() ?: false
+                            hasSelection = false
                             status = if (ok) "Canceled" else "Cancel failed"
                         }
                     }, modifier = Modifier.weight(1f)) { Text("Cancel") }
@@ -181,8 +254,7 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.height(12.dp))
 
-                // Локальная яркость выбранного диапазона
-                Text("Local brightness: ${localBright.toInt()} (диапазон)")
+                Text("Local brightness: ${localBright.toInt()} (range)")
                 Slider(
                     value = localBright,
                     onValueChange = { localBright = it },
@@ -198,8 +270,7 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.height(8.dp))
 
-                // Глобальная яркость
-                Text("Global brightness: ${globalBright.toInt()} (вся лента)")
+                Text("Global brightness: ${globalBright.toInt()} (whole strip)")
                 Slider(
                     value = globalBright,
                     onValueChange = { globalBright = it },
@@ -213,15 +284,32 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Превью выбранного цвета (просто фон прямоугольника, не обязательно)
                 Spacer(Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp)
-                        .background(Color(1f, 1f, 1f, 0.05f))
-                )
+                Box(Modifier.fillMaxWidth().height(40.dp).background(Color(1f,1f,1f,0.05f)))
             }
         }
     }
+}
+
+// ===== Network helpers for scanning =====
+private fun getLocalIpv4(): String? {
+    val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
+    for (ni in ifaces) {
+        if (!ni.isUp || ni.isLoopback) continue
+        val addrs = ni.inetAddresses ?: continue
+        for (addr in addrs) {
+            if (addr is Inet4Address) {
+                val ip = addr.hostAddress ?: continue
+                if (ip.startsWith("10.") || ip.startsWith("172.") || ip.startsWith("192.168.")) {
+                    return ip
+                }
+            }
+        }
+    }
+    return null
+}
+
+private fun subnetPrefix(ip: String): String? {
+    val p = ip.split('.')
+    return if (p.size == 4) "${p[0]}.${p[1]}.${p[2]}" else null
 }
