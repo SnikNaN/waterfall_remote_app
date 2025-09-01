@@ -17,10 +17,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ledctrl.net.LedApi
 import com.example.ledctrl.ui.ColorWheel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
@@ -37,8 +35,7 @@ class MainActivity : ComponentActivity() {
     fun App() {
         val scope = rememberCoroutineScope()
 
-        // Пишем сюда только строки запросов
-        var lastUrl by remember { mutableStateOf<String?>(null) }
+        var status by remember { mutableStateOf("Idle") }
 
         var ipText by remember { mutableStateOf(TextFieldValue("")) }
         var startIdx by remember { mutableStateOf(0f) }
@@ -48,7 +45,6 @@ class MainActivity : ComponentActivity() {
         var localBright by remember { mutableStateOf(255f) }
         var globalBright by remember { mutableStateOf(128f) }
 
-        // сетевое сканирование
         var foundHosts by remember { mutableStateOf(listOf<String>()) }
         var showPicker by remember { mutableStateOf(false) }
 
@@ -58,45 +54,50 @@ class MainActivity : ComponentActivity() {
             if (!saved.isNullOrBlank()) ipText = TextFieldValue(saved)
         }
 
-        fun baseUrl(): String {
-            val raw = ipText.text.trim().removeSuffix("/")
-            val withScheme = if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "http://$raw"
-            return withScheme
-        }
-
         fun api(): LedApi? = ipText.text.trim().takeIf { it.isNotEmpty() }?.let { LedApi(it) }
 
         fun clampRange() {
-            val max = (numLeds - 1).coerceAtLeast(0)
+            val max = (numLeds - 1).coerceAtLeast(0).toFloat()
             if (startIdx < 0f) startIdx = 0f
             if (endIdx < 0f) endIdx = 0f
-            if (startIdx > max) startIdx = max.toFloat()
-            if (endIdx > max) endIdx = max.toFloat()
+            if (startIdx > max) startIdx = max
+            if (endIdx > max) endIdx = max
+            // не даём ползункам ехать друг за друга
+            if (startIdx > endIdx) startIdx = endIdx
+        }
+
+        // мгновенная ГЛОБАЛЬНАЯ яркость (debounce)
+        LaunchedEffect(Unit) {
+            snapshotFlow { globalBright }
+                .map { it.toInt().coerceIn(0, 255) }
+                .distinctUntilChanged()
+                .debounce(70)
+                .collectLatest { v ->
+                    api()?.setGlobalBrightness(v)
+                }
+        }
+
+        // мгновенная ЛОКАЛЬНАЯ яркость (требует selection)
+        LaunchedEffect(hasSelection) {
+            if (!hasSelection) return@LaunchedEffect
+            snapshotFlow { localBright }
+                .map { it.toInt().coerceIn(0, 255) }
+                .distinctUntilChanged()
+                .debounce(70)
+                .collectLatest { v ->
+                    api()?.setLocalBrightness(v)
+                }
         }
 
         Column(
             modifier = Modifier.fillMaxSize().padding(16.dp),
             horizontalAlignment = Alignment.Start
         ) {
-            // ВЕРХНИЙ БЛОК: последняя строка запроса (бросается в глаза)
-            if (lastUrl != null) {
-                Text(
-                    text = "Last request:\n$lastUrl",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.Red,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0x10FF0000))
-                        .padding(8.dp)
-                )
-                Spacer(Modifier.height(8.dp))
-            }
-
             // IP
             OutlinedTextField(
                 value = ipText,
                 onValueChange = { ipText = it },
-                label = { Text("Controller IP") },
+                label = { Text("Controller IP (например 192.168.1.42)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -105,44 +106,48 @@ class MainActivity : ComponentActivity() {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    scope.launch { dataStore.edit { it[keyIp] = ipText.text.trim() } }
+                    scope.launch {
+                        dataStore.edit { it[keyIp] = ipText.text.trim() }
+                        status = "Saved IP"
+                    }
                 }) { Text("Save IP") }
 
                 Button(onClick = {
                     scope.launch {
-                        // /state
-                        val url = "${baseUrl()}/state"
-                        lastUrl = url
                         val raw = api()?.stateRaw()
                         if (raw != null) {
-                            // простая вытяжка num_leds и bright
-                            val n = "\"num_leds\":".let { k ->
+                            status = "Online"
+                            val n = run {
+                                val k = "\"num_leds\":"
                                 val i = raw.indexOf(k)
-                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull()
-                                else null
+                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
                             }
-                            val gb = "\"bright\":".let { k ->
+                            val gb = run {
+                                val k = "\"bright\":"
                                 val i = raw.indexOf(k)
-                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull()
-                                else null
+                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
                             }
                             if (n != null && n > 0) { numLeds = n; startIdx = 0f; endIdx = (n - 1).toFloat() }
                             if (gb != null) globalBright = gb.toFloat()
 
-                            // /select без blink
-                            val s = startIdx.toInt(); val e = endIdx.toInt()
-                            lastUrl = "${baseUrl()}/select?start=$s&end=$e"
-                            api()?.select(s, e, blink = false)
-                            hasSelection = true
+                            val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
+                            hasSelection = okSel
+                            status = if (okSel) "Online · selection 0–${endIdx.toInt()}" else "Online · selection failed"
+                        } else {
+                            status = "No response"
                         }
                     }
-                }) { Text("Test /state + select") }
+                }) { Text("Test /state") }
 
                 Button(onClick = {
                     scope.launch {
-                        // сканирование подсети
                         val me = withContext(Dispatchers.IO) { getLocalIpv4() }
-                        val prefix = me?.let { subnetPrefix(it) } ?: return@launch
+                        val prefix = me?.let { subnetPrefix(it) }
+                        if (prefix == null) {
+                            status = "No local IPv4"
+                            return@launch
+                        }
+                        status = "Scanning $prefix.x ..."
                         val part = (1..254).chunked(32)
                         val found = mutableListOf<String>()
                         for (chunk in part) {
@@ -157,6 +162,7 @@ class MainActivity : ComponentActivity() {
                         }
                         foundHosts = found.sorted()
                         showPicker = true
+                        status = if (foundHosts.isEmpty()) "Scan done: none" else "Scan done: ${foundHosts.size}"
                     }
                 }) { Text("Scan") }
             }
@@ -169,139 +175,128 @@ class MainActivity : ComponentActivity() {
                         Column {
                             if (foundHosts.isEmpty()) Text("Ничего не найдено")
                             foundHosts.forEach { host ->
-                                Button(onClick = {
-                                    ipText = TextFieldValue(host)
-                                    showPicker = false
-                                }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                    Text(host)
-                                }
+                                Button(
+                                    onClick = {
+                                        ipText = TextFieldValue(host)
+                                        showPicker = false
+                                        status = "Selected $host"
+                                    },
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                ) { Text(host) }
                             }
                         }
                     },
-                    confirmButton = {
-                        TextButton(onClick = { showPicker = false }) { Text("Close") }
-                    }
+                    confirmButton = { TextButton(onClick = { showPicker = false }) { Text("Close") } }
                 )
             }
 
             Spacer(Modifier.height(12.dp))
 
-            // Диапазон
+            // Диапазон (ползунки не пересекаются)
             Text("Диапазон: ${startIdx.toInt()} – ${endIdx.toInt()} (из $numLeds)")
             Slider(
                 value = startIdx,
-                onValueChange = { startIdx = it; clampRange() },
+                onValueChange = {
+                    startIdx = it
+                    if (startIdx > endIdx) endIdx = startIdx // удерживаем start <= end
+                    clampRange()
+                },
                 valueRange = 0f..(numLeds - 1).coerceAtLeast(0).toFloat(),
                 modifier = Modifier.fillMaxWidth()
             )
             Slider(
                 value = endIdx,
-                onValueChange = { endIdx = it; clampRange() },
+                onValueChange = {
+                    endIdx = it
+                    if (endIdx < startIdx) startIdx = endIdx // удерживаем start <= end
+                    clampRange()
+                },
                 valueRange = 0f..(numLeds - 1).coerceAtLeast(0).toFloat(),
                 modifier = Modifier.fillMaxWidth()
             )
 
             Spacer(Modifier.height(12.dp))
 
-            // Колесо цвета
+            // Палитра цвета
             ColorWheel(onColorChanged = { c: Color ->
                 scope.launch {
                     clampRange()
                     if (!hasSelection) {
-                        val s = startIdx.toInt(); val e = endIdx.toInt()
-                        lastUrl = "${baseUrl()}/select?start=$s&end=$e"
-                        val okSel = api()?.select(s, e, blink = false) ?: false
+                        val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
                         hasSelection = okSel
-                        if (!okSel) return@launch
+                        if (!okSel) { status = "Select failed"; return@launch }
                     }
-                    // Формируем RRGGBB (без '#')
                     val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                         "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                     }
-                    // /set?hex=...
-                    lastUrl = "${baseUrl()}/set?hex=$hex"
-                    api()?.setPreviewHexStatus(hex)
+                    val resp = api()?.setPreviewHexStatus(hex)
+                    status = when (resp?.first) {
+                        200 -> "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}"
+                        400 -> "Set failed (400 bad hex?)"
+                        409 -> "Set failed (409 no selection)"
+                        null -> "Network error"
+                        else -> "Set failed (${resp.first})"
+                    }
                 }
             })
 
             Spacer(Modifier.height(12.dp))
 
-            // Локальная яркость
+            // Локальная яркость (мгновенно через LaunchedEffect выше)
             Text("Local brightness: ${localBright.toInt()}")
             Slider(
                 value = localBright,
                 onValueChange = { localBright = it },
-                onValueChangeFinished = {
-                    scope.launch {
-                        if (!hasSelection) return@launch
-                        val v = localBright.toInt().coerceIn(0,255)
-                        lastUrl = "${baseUrl()}/lbright?value=$v"
-                        api()?.setLocalBrightness(v)
-                    }
-                },
                 valueRange = 0f..255f,
                 modifier = Modifier.fillMaxWidth()
             )
 
-            // Глобальная яркость
+            // Глобальная яркость (мгновенно через LaunchedEffect выше)
             Text("Global brightness: ${globalBright.toInt()}")
             Slider(
                 value = globalBright,
                 onValueChange = { globalBright = it },
-                onValueChangeFinished = {
-                    scope.launch {
-                        val v = globalBright.toInt().coerceIn(0,255)
-                        lastUrl = "${baseUrl()}/brightness?value=$v"
-                        api()?.setGlobalBrightness(v)
-                    }
-                },
                 valueRange = 0f..255f,
                 modifier = Modifier.fillMaxWidth()
             )
 
             Spacer(Modifier.height(8.dp))
 
+            // Управляющие кнопки
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     scope.launch {
                         clampRange()
-                        val s = startIdx.toInt(); val e = endIdx.toInt()
-                        lastUrl = "${baseUrl()}/select?start=$s&end=$e&blink=1"
-                        api()?.select(s, e, blink = true)
-                        hasSelection = true
+                        val ok = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true) ?: false
+                        hasSelection = ok
+                        status = if (ok) "Selected with blink" else "Select failed"
                     }
-                }) { Text("Select + Blink") }
+                }) { Text("Blink") }
 
                 Button(onClick = {
                     scope.launch {
-                        lastUrl = "${baseUrl()}/cancel"
-                        api()?.cancel()
+                        val ok = api()?.cancel() ?: false
                         hasSelection = false
+                        status = if (ok) "Cancel OK" else "Cancel failed"
                     }
                 }) { Text("Cancel") }
 
                 Button(onClick = {
                     scope.launch {
-                        lastUrl = "${baseUrl()}/save"
-                        api()?.save()
+                        val ok = api()?.save() ?: false
+                        status = if (ok) "Saved" else "Save failed"
                     }
                 }) { Text("Save") }
             }
 
-            Spacer(Modifier.height(12.dp))
-
-            // Небольшая “подложка”, чтобы верхний блок с URL не сливался
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(12.dp)
-                    .background(Color(0x06000000))
-            )
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.fillMaxWidth().height(40.dp).background(Color(1f, 1f, 1f, 0.05f)))
+            Text("Status: $status")
         }
     }
 }
 
-/* ===== Network helpers for scanning ===== */
+/* ===== Сканирование подсети ===== */
 private fun getLocalIpv4(): String? {
     val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
     for (iface in ifaces) {
