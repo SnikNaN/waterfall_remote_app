@@ -9,9 +9,7 @@ import okhttp3.Request
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
-/**
- * RequestBus — чтобы прямо в приложении показывать последний отправленный URL.
- */
+/** Шина для отображения последнего запроса прямо в UI */
 object RequestBus {
     val last = MutableStateFlow<String?>(null)
 }
@@ -40,6 +38,8 @@ class LedApi(baseInput: String) {
 
     private fun url(path: String): String = "$base/${path.removePrefix("/")}"
 
+/* ---------------- low-level GET helpers (c логированием URL в RequestBus) ---------------- */
+
     private suspend fun get(path: String): Boolean = withContext(Dispatchers.IO) {
         val full = url(path)
         RequestBus.last.value = full
@@ -60,13 +60,15 @@ class LedApi(baseInput: String) {
         } catch (_: Exception) { null }
     }
 
+/* ----------------------------------- API ----------------------------------- */
+
     suspend fun stateRaw(): String? = withContext(Dispatchers.IO) {
         val full = url("state")
         RequestBus.last.value = full
         Log.d("LedApi", "GET → $full")
         try {
             client.newCall(Request.Builder().url(full).build())
-                .execute().use { if (it.isSuccessful) it.body?.string() else it.body?.string() }
+                .execute().use { it.body?.string() }
         } catch (_: Exception) { null }
     }
 
@@ -75,7 +77,7 @@ class LedApi(baseInput: String) {
     suspend fun select(start: Int, end: Int, blink: Boolean = false): Boolean =
         get("select?start=$start&end=$end${if (blink) "&blink=1" else ""}")
 
-    // '#RRGGBB' или 'RRGGBB'
+    /** hex может быть '#RRGGBB' или 'RRGGBB' */
     suspend fun setPreviewHexStatus(hex: String, lbright: Int? = null): Pair<Int, String?>? {
         val clean = hex.trim().removePrefix("#")
         val lb = lbright?.let { "&lbright=${it.coerceIn(0,255)}" } ?: ""
