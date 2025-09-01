@@ -197,8 +197,14 @@ class MainActivity : ComponentActivity() {
                         val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                             "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                         }
-                        val ok = api()?.setPreviewHex(hex /*, lbright = localBright.toInt()*/) ?: false
-                        status = if (ok) "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}" else "Set preview failed"
+                        val resp = api()?.setPreviewHexStatus(hex /*, lbright = localBright.toInt() */)
+                        status = when (resp?.first) {
+                            200 -> "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}"
+                            400 -> "Set failed (400 bad hex?)"
+                            409 -> "Set failed (409 no selection)"
+                            null -> "Network error"
+                            else -> "Set failed (HTTP ${resp.first})"
+                        }
                     }
                 })
 
