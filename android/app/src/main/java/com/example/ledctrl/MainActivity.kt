@@ -39,8 +39,10 @@ class MainActivity : ComponentActivity() {
     fun App() {
         val scope = rememberCoroutineScope()
 
-        var status by remember { mutableStateOf("Idle") }
-        var lastUrl by remember { mutableStateOf<String?>(null) }   // ← отдельная строка для URL
+        // показываем только запросы
+        var lastUrl by remember { mutableStateOf<String?>(null) }
+        var lastCode by remember { mutableStateOf<Int?>(null) }
+
         var ipText by remember { mutableStateOf(TextFieldValue("")) }
         var startIdx by remember { mutableStateOf(0f) }
         var endIdx by remember { mutableStateOf(0f) }
@@ -49,20 +51,21 @@ class MainActivity : ComponentActivity() {
         var localBright by remember { mutableStateOf(255f) }
         var globalBright by remember { mutableStateOf(128f) }
 
-        // сетевое сканирование
+        // сканирование
         var foundHosts by remember { mutableStateOf(listOf<String>()) }
         var showPicker by remember { mutableStateOf(false) }
 
-        // загрузка сохранённого IP
+        // загрузка IP
         LaunchedEffect(Unit) {
             val saved = dataStore.data.first()[keyIp]
             if (!saved.isNullOrBlank()) ipText = TextFieldValue(saved)
         }
 
-        // подписка на шину запросов: не затираем status, держим отдельный lastUrl
+        // подписка на RequestBus: отражаем URL и код
         LaunchedEffect(Unit) {
-            RequestBus.last.collectLatest { url ->
-                lastUrl = url
+            RequestBus.last.collectLatest { pair ->
+                lastUrl = pair?.first
+                lastCode = pair?.second
             }
         }
 
@@ -84,7 +87,7 @@ class MainActivity : ComponentActivity() {
             OutlinedTextField(
                 value = ipText,
                 onValueChange = { ipText = it },
-                label = { Text("Controller IP (например 192.168.1.42)") },
+                label = { Text("Controller IP") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -93,51 +96,36 @@ class MainActivity : ComponentActivity() {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    scope.launch {
-                        dataStore.edit { it[keyIp] = ipText.text.trim() }
-                        status = "Saved IP"
-                    }
+                    scope.launch { dataStore.edit { it[keyIp] = ipText.text.trim() } }
                 }) { Text("Save IP") }
 
                 Button(onClick = {
                     scope.launch {
                         val raw = api()?.stateRaw()
                         if (raw != null) {
-                            status = "Online"
-                            // простая вытяжка num_leds и bright
-                            val n = run {
-                                val k = "\"num_leds\":"
+                            val n = "\"num_leds\":".let { k ->
                                 val i = raw.indexOf(k)
-                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
+                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull()
+                                else null
                             }
-                            val gb = run {
-                                val k = "\"bright\":"
+                            val gb = "\"bright\":".let { k ->
                                 val i = raw.indexOf(k)
-                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull() else null
+                                if (i >= 0) raw.substring(i + k.length).takeWhile { it.isDigit() }.toIntOrNull()
+                                else null
                             }
                             if (n != null && n > 0) { numLeds = n; startIdx = 0f; endIdx = (n - 1).toFloat() }
                             if (gb != null) globalBright = gb.toFloat()
-
-                            // выбираем всю ленту без мигания
-                            val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
-                            hasSelection = okSel
-                            status = if (okSel) "Online · selection 0–${endIdx.toInt()}" else "Online · selection failed"
-                        } else {
-                            status = "No response"
+                            api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false)
+                            hasSelection = true
                         }
                     }
                 }) { Text("Test /state") }
 
                 Button(onClick = {
                     scope.launch {
-                        // сканирование подсети
                         val me = withContext(Dispatchers.IO) { getLocalIpv4() }
                         val prefix = me?.let { subnetPrefix(it) }
-                        if (prefix == null) {
-                            status = "No local IPv4"
-                            return@launch
-                        }
-                        status = "Scanning $prefix.x ..."
+                        if (prefix == null) return@launch
                         val part = (1..254).chunked(32)
                         val found = mutableListOf<String>()
                         for (chunk in part) {
@@ -148,11 +136,10 @@ class MainActivity : ComponentActivity() {
                                     if (ok) synchronized(found) { found.add(ip) }
                                 }
                             }
-                            jobs.forEach { it.join() } // дождаться пачки
+                            jobs.forEach { it.join() }
                         }
                         foundHosts = found.sorted()
                         showPicker = true
-                        status = if (foundHosts.isEmpty()) "Scan done: none" else "Scan done: ${foundHosts.size}"
                     }
                 }) { Text("Scan") }
             }
@@ -168,7 +155,6 @@ class MainActivity : ComponentActivity() {
                                 Button(onClick = {
                                     ipText = TextFieldValue(host)
                                     showPicker = false
-                                    status = "Selected $host"
                                 }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                                     Text(host)
                                 }
@@ -207,35 +193,25 @@ class MainActivity : ComponentActivity() {
                     if (!hasSelection) {
                         val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
                         hasSelection = okSel
-                        if (!okSel) { status = "Select failed"; return@launch }
+                        if (!okSel) return@launch
                     }
-                    // Формируем RRGGBB (без '#')
                     val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                         "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                     }
-                    val resp = api()?.setPreviewHexStatus(hex /*, lbright = localBright.toInt() */)
-                    status = when (resp?.first) {
-                        200 -> "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}"
-                        400 -> "Set failed (400 bad hex?)"
-                        409 -> "Set failed (409 no selection)"
-                        null -> "Network error"
-                        else -> "Set failed (${resp.first})"
-                    }
+                    api()?.setPreviewHexStatus(hex)
                 }
             })
 
             Spacer(Modifier.height(12.dp))
 
-            // Локальная яркость выбранного диапазона
+            // Локальная яркость
             Text("Local brightness: ${localBright.toInt()}")
             Slider(
                 value = localBright,
                 onValueChange = { localBright = it },
                 onValueChangeFinished = {
                     scope.launch {
-                        if (!hasSelection) return@launch
-                        val ok = api()?.setLocalBrightness(localBright.toInt()) ?: false
-                        status = if (ok) "lbright=${localBright.toInt()}" else "lbright failed"
+                        if (hasSelection) api()?.setLocalBrightness(localBright.toInt())
                     }
                 },
                 valueRange = 0f..255f,
@@ -248,10 +224,7 @@ class MainActivity : ComponentActivity() {
                 value = globalBright,
                 onValueChange = { globalBright = it },
                 onValueChangeFinished = {
-                    scope.launch {
-                        val ok = api()?.setGlobalBrightness(globalBright.toInt()) ?: false
-                        status = if (ok) "gbright=${globalBright.toInt()}" else "gbright failed"
-                    }
+                    scope.launch { api()?.setGlobalBrightness(globalBright.toInt()) }
                 },
                 valueRange = 0f..255f,
                 modifier = Modifier.fillMaxWidth()
@@ -259,47 +232,42 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(8.dp))
 
-            // Управляющие кнопки
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     scope.launch {
                         clampRange()
-                        val ok = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true) ?: false
-                        hasSelection = ok
-                        status = if (ok) "Selected with blink" else "Select failed"
+                        api()?.select(startIdx.toInt(), endIdx.toInt(), blink = true)
+                        hasSelection = true
                     }
                 }) { Text("Select + Blink") }
 
-                Button(onClick = {
-                    scope.launch {
-                        val ok = api()?.cancel() ?: false
-                        hasSelection = false
-                        status = if (ok) "Cancel OK" else "Cancel failed"
-                    }
-                }) { Text("Cancel") }
-
-                Button(onClick = {
-                    scope.launch {
-                        val ok = api()?.save() ?: false
-                        status = if (ok) "Saved" else "Save failed"
-                    }
-                }) { Text("Save") }
+                Button(onClick = { scope.launch { api()?.cancel(); hasSelection = false } }) { Text("Cancel") }
+                Button(onClick = { scope.launch { api()?.save() } }) { Text("Save") }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // Полоса состояния + последний URL
+            // Видим только запросы: URL + код
             if (lastUrl != null) {
-                Text("Last request: $lastUrl", style = MaterialTheme.typography.bodySmall)
+                val codeTxt = lastCode?.toString() ?: "—"
+                val color = when (lastCode) {
+                    in 200..299 -> Color(0xFF2E7D32) // зелёный для 2xx
+                    in 400..499 -> Color(0xFFC62828) // красный для 4xx
+                    in 500..599 -> Color(0xFFAD1457) // малиновый для 5xx
+                    null -> Color(0xFF6D4C41)       // сеть/исключение
+                    else -> Color(0xFF1565C0)       // прочее
+                }
+                Text(
+                    text = "Last: [$codeTxt] $lastUrl",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = color
+                )
             }
-            Box(Modifier.fillMaxWidth().height(40.dp).background(Color(1f, 1f, 1f, 0.05f)))
-            Text("Status: $status")
         }
     }
 }
 
 /* ===== Network helpers for scanning ===== */
-
 private fun getLocalIpv4(): String? {
     val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
     for (iface in ifaces) {
