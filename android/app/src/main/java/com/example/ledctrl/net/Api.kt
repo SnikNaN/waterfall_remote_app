@@ -9,9 +9,10 @@ import okhttp3.Request
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
-/** Шина для отображения последнего запроса прямо в UI */
+/** Шина для UI: последний запрос и его HTTP-код ответа */
 object RequestBus {
-    val last = MutableStateFlow<String?>(null)
+    /** Pair(url, code). code == null — сеть/исключение; 200/400/… — реальный код ответа */
+    val last = MutableStateFlow<Pair<String, Int?>?>(null)
 }
 
 class LedApi(baseInput: String) {
@@ -38,38 +39,53 @@ class LedApi(baseInput: String) {
 
     private fun url(path: String): String = "$base/${path.removePrefix("/")}"
 
-/* ---------------- low-level GET helpers (c логированием URL в RequestBus) ---------------- */
+/* ---------------- low-level GET helpers (логируем URL и код ответа) ---------------- */
 
     private suspend fun get(path: String): Boolean = withContext(Dispatchers.IO) {
         val full = url(path)
-        RequestBus.last.value = full
+        RequestBus.last.value = full to null
         Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(full).build())
-                .execute().use { it.isSuccessful }
-        } catch (_: Exception) { false }
+            client.newCall(Request.Builder().url(full).build()).execute().use { resp ->
+                RequestBus.last.value = full to resp.code
+                resp.isSuccessful
+            }
+        } catch (_: Exception) {
+            RequestBus.last.value = full to null
+            false
+        }
     }
 
     private suspend fun getStatus(path: String): Pair<Int, String?>? = withContext(Dispatchers.IO) {
         val full = url(path)
-        RequestBus.last.value = full
+        RequestBus.last.value = full to null
         Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(full).build())
-                .execute().use { it.code to (it.body?.string()) }
-        } catch (_: Exception) { null }
+            client.newCall(Request.Builder().url(full).build()).execute().use { resp ->
+                RequestBus.last.value = full to resp.code
+                resp.code to (resp.body?.string())
+            }
+        } catch (_: Exception) {
+            RequestBus.last.value = full to null
+            null
+        }
     }
 
 /* ----------------------------------- API ----------------------------------- */
 
     suspend fun stateRaw(): String? = withContext(Dispatchers.IO) {
         val full = url("state")
-        RequestBus.last.value = full
+        RequestBus.last.value = full to null
         Log.d("LedApi", "GET → $full")
         try {
-            client.newCall(Request.Builder().url(full).build())
-                .execute().use { it.body?.string() }
-        } catch (_: Exception) { null }
+            client.newCall(Request.Builder().url(full).build()).execute().use { resp ->
+                RequestBus.last.value = full to resp.code
+                resp.body?.string()
+            }
+        } catch (_: Exception) {
+            RequestBus.last.value = full to null
+            null
+        }
     }
 
     suspend fun ping(): Boolean = stateRaw() != null
