@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
                             val raw = api()?.stateRaw()
                             if (raw != null) {
                                 status = "Online"
-                                // parse num_leds and bright lazily
+                                // простая вытяжка num_leds и bright
                                 val n = run {
                                     val k = "\"num_leds\":"
                                     val i = raw.indexOf(k)
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                                 if (n != null && n > 0) { numLeds = n; startIdx = 0f; endIdx = (n - 1).toFloat() }
                                 if (gb != null) globalBright = gb.toFloat()
 
-                                // Select whole strip silently
+                                // Выбираем всю ленту без мигания (чтобы колесо сразу работало)
                                 val okSel = api()?.select(startIdx.toInt(), endIdx.toInt(), blink = false) ?: false
                                 hasSelection = okSel
                                 status = if (okSel) "Online · selection 0–${endIdx.toInt()}" else "Online · selection failed"
@@ -193,10 +193,11 @@ class MainActivity : ComponentActivity() {
                             hasSelection = okSel
                             if (!okSel) { status = "Select failed"; return@launch }
                         }
-                        val hex = "#" + listOf(c.red, c.green, c.blue).joinToString("") {
+                        // ШЛЁМ RRGGBB (без #) — иначе сервер видит пустой hex
+                        val hex = listOf(c.red, c.green, c.blue).joinToString("") {
                             "%02X".format((it * 255f).toInt().coerceIn(0, 255))
                         }
-                        val ok = api()?.setPreviewHex(hex) ?: false
+                        val ok = api()?.setPreviewHex(hex /*, lbright = localBright.toInt()*/) ?: false
                         status = if (ok) "Preview $hex on ${startIdx.toInt()}–${endIdx.toInt()}" else "Set preview failed"
                     }
                 })
