@@ -17,8 +17,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ledctrl.net.LedApi
 import com.example.ledctrl.ui.ColorWheel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
@@ -121,7 +120,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }) { Text("Test /state") }
                     Button(onClick = {
-                        // Scan subnet
                         val myIp = getLocalIpv4()
                         val prefix = myIp?.let { subnetPrefix(it) }
                         if (prefix == null) {
@@ -130,24 +128,31 @@ class MainActivity : ComponentActivity() {
                         }
                         scanning = true
                         status = "Scanning $prefix.*"
+
                         scope.launch(Dispatchers.IO) {
                             val candidates = (1..254).map { "$prefix.$it" }
                             val okList = mutableListOf<String>()
-                            val chunk = 32
-                            for (part in candidates.chunked(chunk)) {
-                                val jobs = part.map { host ->
-                                    kotlinx.coroutines.async {
-                                        val client = LedApi(host)
-                                        if (client.ping()) host else null
+                            val chunkSize = 32
+
+                            for (part in candidates.chunked(chunkSize)) {
+                                val found = part
+                                    .map { host ->
+                                        async {
+                                            val client = LedApi(host)
+                                            if (client.ping()) host else null
+                                        }
                                     }
-                                }
-                                val res = jobs.mapNotNull { it.await() }
-                                synchronized(okList) { okList.addAll(res) }
+                                    .awaitAll()
+                                    .filterNotNull()
+                                okList.addAll(found)
                             }
-                            foundHosts = okList.sorted()
-                            scanning = false
-                            showPicker = true
-                            status = if (okList.isEmpty()) "No devices" else "Found: ${okList.size}"
+
+                            withContext(Dispatchers.Main) {
+                                foundHosts = okList.sorted()
+                                scanning = false
+                                showPicker = true
+                                status = if (okList.isEmpty()) "No devices" else "Found: ${okList.size}"
+                            }
                         }
                     }) { Text(if (scanning) "Scanning..." else "Scan") }
                 }
