@@ -47,11 +47,11 @@ fun ColorWheel(
             brush = Brush.sweepGradient(
                 listOf(
                     Color.Red,
-                    Color.Magenta,
-                    Color.Blue,
-                    Color.Cyan,
-                    Color.Green,
                     Color.Yellow,
+                    Color.Green,
+                    Color.Cyan,
+                    Color.Blue,
+                    Color.Magenta,
                     Color.Red
                 )
             ),
